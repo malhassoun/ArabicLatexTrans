@@ -567,7 +567,49 @@ def add_ja_package(latex_code):
             position = match.end()
             latex_code = latex_code[:position] + "\n" + ctex_package + "\n" + latex_code[position:]
     return latex_code
+## Updated fix_table_direction_for_arabic to preserve the table structure and content without changes 
+def fix_table_direction_for_arabic(latex_code):
+    """
+    Force LaTeX tables to render left-to-right in an Arabic document.
 
+    The original table source is preserved. Only an English/LTR
+    direction group is added around the actual tabular environment.
+    """
+
+    tabular_pattern = re.compile(
+        r"""
+        (?P<table>
+            \\begin\s*\{
+                (?P<env>
+                    tabular\*?
+                    |tabularx
+                    |tabulary
+                    |longtable\*?
+                    |tblr
+                )
+            \}
+            .*?
+            \\end\s*\{\s*(?P=env)\s*\}
+        )
+        """,
+        re.VERBOSE | re.DOTALL
+    )
+
+    def wrap(match):
+        table = match.group("table")
+
+        # Don't apply the fix twice
+        if r"\begin{english}" in table:
+            return table
+
+        return (
+            "\\begin{english}\n"
+            + table
+            + "\n\\end{english}"
+        )
+
+    return tabular_pattern.sub(wrap, latex_code)
+    
 def fix_figure_direction_for_arabic(latex_code):
     """
     Force every \\includegraphics call into an explicit left-to-right
@@ -1019,6 +1061,7 @@ def add_arabic_package(latex_code):
         # only, before any of our own text is added, avoids this entirely.
         latex_code = fix_pdfoutput_for_xelatex(latex_code)
         latex_code = fix_figure_direction_for_arabic(latex_code)
+        latex_code = fix_table_direction_for_arabic(latex_code)
         latex_code = fix_number_direction_for_arabic(latex_code)
         latex_code = fix_author_direction_for_arabic(latex_code)
 
