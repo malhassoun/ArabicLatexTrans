@@ -856,8 +856,172 @@ def fix_pdfoutput_for_xelatex(latex_code: str) -> str:
         latex_code,
     )
 
+def fix_number_direction_for_arabic(latex_code):
+    """
+    Force decimal numbers and percentages into an explicit left-to-right
+    direction using Unicode bidi ISOLATE characters (U+2066 LEFT-TO-RIGHT
+    ISOLATE / U+2069 POP DIRECTIONAL ISOLATE).
+
+    Confirmed by direct visual inspection of a compiled PDF (Table 2's
+    caption in arXiv 2106.08364): Cohen's kappa values written as "0.79"
+    and "0.82" in the source render as "79.0" and "82.0" -- the digit
+    groups on either side of the decimal point are swapped by RTL
+    reordering.
+
+    THIS IS A MORE CONSERVATIVE VERSION than an earlier attempt, which
+    caused a severe, confirmed regression: wrapping numbers found anywhere
+    in the document -- including "1.2", "1.3" style SECTION/SUBSECTION
+    NUMBERS -- corrupted whatever mechanism builds running headers and
+    pagination from them, producing garbled fragments on every page and
+    several near-blank pages. Rather than trying to exclude every
+    structural case one regression at a time (the pattern that failed
+    four times before this), this version explicitly EXCLUDES the content
+    of heading commands entirely (\\section, \\subsection, \\subsubsection,
+    \\paragraph) -- the numbers this fix targets live in body text and
+    captions, never in headings, so excluding heading content by
+    construction removes an entire category of risk rather than patching
+    around individual symptoms of it.
+
+    Also fixed here: an earlier version's color-command exclusion used
+    get_command_pattern(), which only captures ONE brace argument by
+    design (see get_pattern_command_full's n=1 default) -- for
+    \\definecolor{name}{model}{spec}, that only matched the harmless
+    {name} argument, leaving {model}{spec} (where the actual numeric
+    value lives, e.g. \\definecolor{Gray}{gray}{0.9}) completely
+    unprotected. Confirmed by the same compile log: this exact case
+    produced "Missing character" and dimension-parsing errors. Fixed by
+    calling get_pattern_command_full() directly with the correct argument
+    count per command, rather than the single-argument-only helper.
+    """
+    LRI = "\u2066"  # LEFT-TO-RIGHT ISOLATE
+    PDI = "\u2069"  # POP DIRECTIONAL ISOLATE
+
+    protected_spans = []
+
+    # \definecolor{name}{model}{spec} -- always exactly 3 brace arguments,
+    # regardless of color model (gray takes 1 number, rgb takes 3, cmyk
+    # takes 4 -- all still inside that same third argument).
+    definecolor_pattern = regex.compile(
+        get_pattern_command_full("definecolor", 3), regex.DOTALL
+    )
+    for m in definecolor_pattern.finditer(latex_code):
+        protected_spans.append(m.span())
+
+    # \color{spec}, \pagecolor{spec} -- single argument, nothing follows
+    # that needs to remain eligible for number-wrapping.
+    for command_name in ("color", "pagecolor"):
+        pat = regex.compile(get_pattern_command_full(command_name, 1), regex.DOTALL)
+        for m in pat.finditer(latex_code):
+            protected_spans.append(m.span())
+
+    # \textcolor{spec}{text}, \colorbox{spec}{text} -- protect ONLY the
+    # first (color-spec) argument; the second argument is real displayed
+    # content that may contain genuine numbers needing protection.
+    for command_name in ("textcolor", "colorbox"):
+        pat = regex.compile(get_pattern_command_full(command_name, 2), regex.DOTALL)
+        for m in pat.finditer(latex_code):
+            protected_spans.append(m.span(1))
+
+    # \fcolorbox{spec1}{spec2}{text} -- protect the first two (color-spec)
+    # arguments; the third is real displayed content.
+    fcolorbox_pattern = regex.compile(
+        get_pattern_command_full("fcolorbox", 3), regex.DOTALL
+    )
+    for m in fcolorbox_pattern.finditer(latex_code):
+        protected_spans.append((m.start(1), m.end(2)))
+
+    # Exclude heading commands entirely -- see docstring above for why.
+    for command_name in ("section", "subsection", "subsubsection", "paragraph"):
+        pat = regex.compile(get_pattern_command_full(command_name), regex.DOTALL)
+        for m in pat.finditer(latex_code):
+            protected_spans.append(m.span())
+
+    def is_protected(pos):
+        return any(start <= pos < end for start, end in protected_spans)
+
+    # Math mode ($...$ and \[...\]) -- \beginL/\endL-style direction
+    # commands are invalid there, and Unicode isolates have not been
+    # confirmed safe inside math mode either. Escaped dollar signs (\$)
+    # are not treated as math delimiters.
+    math_spans = []
+    dollar_positions = [m.start() for m in re.finditer(r"(?<!\\)\$", latex_code)]
+    for i in range(0, len(dollar_positions) - 1, 2):
+        math_spans.append((dollar_positions[i], dollar_positions[i + 1] + 1))
+    for m in re.finditer(r"\\\[.*?\\\]", latex_code, re.DOTALL):
+        math_spans.append((m.start(), m.end()))
+
+    def is_math(pos):
+        return any(start <= pos < end for start, end in math_spans)
+
+    # Numbers immediately followed by a letter or backslash with no space
+    # (e.g. "0.5pt", "0.95\linewidth") are LaTeX dimension values, not
+    # displayed text -- EXCEPT for a LaTeX-escaped percent sign (\%),
+    # which is real displayed content (a bare "%" starts a LaTeX comment,
+    # so a literal percent sign must be written as \%). This is matched
+    # as part of the number itself, before the dimension-safety lookahead
+    # runs, so it doesn't get mistaken for a dimension command. Confirmed
+    # by testing on a real compiled PDF: "84.7\%" was previously excluded
+    # entirely by the backslash-lookahead (intended for cases like
+    # 0.95\linewidth), leaving both the number and the percent sign
+    # unprotected and allowing RTL to reorder them independently,
+    # producing garbled output like "7%.84".
+    pattern = re.compile(r"\d+\.\d+(?:\\%|%)?(?![a-zA-Z0-9\\])")
+
+    def wrap(match):
+        if is_protected(match.start()) or is_math(match.start()):
+            return match.group(0)
+        return LRI + match.group(0) + PDI
+
+    return pattern.sub(wrap, latex_code)
+
+
+def apply_arabic_content_direction_fixes(latex_code):
+    """
+    Apply ONLY the content-level RTL-direction fixes (figures, numbers,
+    author/affiliation) -- NOT the preamble (packages, fonts, float
+    settings) that add_arabic_package() also injects.
+
+    This project generates translated content across MULTIPLE separate
+    files, not just the main document (tables/*.tex, texfiles/*.tex).
+    add_arabic_package() only ever runs on the main file, and its preamble
+    injection must not be duplicated into a file that gets \\input{}'d
+    into the main document -- this function exists so the content fixes
+    can still be applied to every generated file independently.
+
+    Confirmed by testing: a reported "0.79 renders as 79.0" bug persisted
+    even after fix_number_direction_for_arabic() was confirmed correct in
+    isolation, because the affected text lived entirely in a separate
+    texfiles/*.tex file that reconstruct.py writes to disk directly,
+    never passing through add_arabic_package() (or any content fix) at
+    all -- only main.tex itself was ever being processed.
+    """
+    latex_code = fix_figure_direction_for_arabic(latex_code)
+    latex_code = fix_number_direction_for_arabic(latex_code)
+    latex_code = fix_author_direction_for_arabic(latex_code)
+    return latex_code
+
+
 def add_arabic_package(latex_code):
     if "\\usepackage{polyglossia}" not in latex_code and "\\usepackage{babel}" not in latex_code:
+        # Apply content-level fixes to the ORIGINAL document FIRST, before
+        # inserting our own preamble below. This ordering is required:
+        # our own preamble contains decimal numbers (\topfraction}{0.9},
+        # \textfraction}{0.1}, \floatpagefraction}{0.8},
+        # \bottomfraction}{0.9}) that fix_number_direction_for_arabic
+        # would otherwise match and wrap in Unicode isolate characters --
+        # confirmed by testing on a real compile log: with the fixes
+        # running in the other order, these exact four values (0.9, 0.9,
+        # 0.8, 0.1) appeared corrupted and repeating on every single page
+        # of the compiled PDF, since \renewcommand{\topfraction}{0.9} is
+        # not excluded by the color-command, math-mode, heading, or
+        # dimension-value exclusions (the closing brace after "0.9" is
+        # none of those). Running these fixes on the original content
+        # only, before any of our own text is added, avoids this entirely.
+        latex_code = fix_pdfoutput_for_xelatex(latex_code)
+        latex_code = fix_figure_direction_for_arabic(latex_code)
+        latex_code = fix_number_direction_for_arabic(latex_code)
+        latex_code = fix_author_direction_for_arabic(latex_code)
+
         has_authblk = bool(
             re.search(
                 r"\\usepackage(?:\[[^\]]*\])?\{authblk\}",
@@ -959,9 +1123,6 @@ def add_arabic_package(latex_code):
                 + arabic_packages
                 + latex_code[position:]
             )
-        latex_code = fix_pdfoutput_for_xelatex(latex_code)
-        latex_code = fix_figure_direction_for_arabic(latex_code)
-        latex_code = fix_author_direction_for_arabic(latex_code)
         latex_code = fix_abstract_heading_for_arabic(latex_code)
         latex_code = fix_acmart_frontmatter_for_arabic(latex_code)
     return latex_code

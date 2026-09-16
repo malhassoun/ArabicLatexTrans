@@ -110,6 +110,18 @@ class LatexConstructor:
                 relative_path = input_info["path"]
                 if not relative_path.endswith(".tex"):
                     relative_path += ".tex"
+                # Apply the same content-level Arabic RTL fixes (figures,
+                # numbers, author/affiliation) that main.tex gets, to this
+                # sub-file's content BEFORE writing it to disk. Confirmed
+                # by testing on a real compiled PDF: numbers inside a
+                # sub-file (e.g. tables/experiments.tex) rendered reversed
+                # (e.g. "0.79" as "79.0"), because this content was
+                # previously written to disk completely raw --
+                # add_arabic_package() only ever runs afterward on the
+                # remaining main-document string, which by then contains
+                # only \input{...} references pointing at these files, not
+                # their actual content.
+                inner_content = apply_arabic_content_direction_fixes(inner_content)
                 output_path = os.path.join(self.output_latex_dir, relative_path)
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(inner_content + "\n")
@@ -130,10 +142,10 @@ class LatexConstructor:
             print(f"⚠️ Warning: Residual placeholders found and removed: {residual_matches}")
             tex = re.sub(r"<PLACEHOLDER_[^>]*>", "", tex)
 
-        # tex = add_ctex_package(tex) # zh
+        #tex = add_ctex_package(tex) # zh
         # tex = add_ja_package(tex)  # ja
         tex = add_arabic_package(tex)  # ar
-        
+
         main_file_path = find_main_tex_file(self.output_latex_dir)
         if os.path.exists(main_file_path):
             with open(main_file_path, "w", encoding="utf-8") as f:
