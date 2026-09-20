@@ -69,7 +69,10 @@ class LatexParser:
             sys.stderr = sys.__stderr__
 
             if section["section"] == "0" or section["section"] == "-1":
-                section_content = self._extract_captions(section["content"])
+                #section_content = self._extract_captions(section["content"])
+                # Extract author notes separately because the preamble and content before the first section are not translated as sections
+                section_content = self._extract_author_notes(section["content"])
+                section_content = self._extract_captions(section_content)
                 self.sections_json[i]["trans_content"] = self._extract_envs(section_content)
                 self.sections_json[i]["content"] = self.sections_json[i]["trans_content"]
             else:
@@ -189,6 +192,44 @@ class LatexParser:
             })
         
         return full_tex
+
+    def _extract_author_notes(self, tex: str) -> str:
+        """
+        Extract \thanks commands from author blocks for translation
+        while preserving the remaining author information.
+        """
+        full_tex = remove_comments(tex)
+        author_pattern = get_command_pattern(r'author')
+        note_pattern = get_command_pattern(r'thanks')
+
+        result_tex = ""
+        last_end = 0
+
+        for author_match in author_pattern.finditer(full_tex):
+            block = author_match.group(0)
+            new_block = ""
+            pos = 0
+
+            for note in note_pattern.finditer(block):
+                self.caption_count += 1
+                placeholder = f"<PLACEHOLDER_CAP_{self.caption_count}>"
+
+                new_block += block[pos:note.start()] + placeholder
+                pos = note.end()
+
+                self.captions_json.append({
+                    "placeholder": placeholder,
+                    "cap_type": note.group(1),
+                    "content": note.group(0),
+                    "trans_content": ''
+                })
+
+            new_block += block[pos:]
+            result_tex += full_tex[last_end:author_match.start()] + new_block
+            last_end = author_match.end()
+
+        result_tex += full_tex[last_end:]
+        return result_tex
 
     def _extract_captions(self, tex: str) -> str:
         """

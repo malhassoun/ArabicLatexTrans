@@ -61,7 +61,12 @@ class LatexConstructor:
         """
         for caption in self.captions:
             placeholder = caption["placeholder"]
-            tex = tex.replace(placeholder, caption["trans_content"])
+            #tex = tex.replace(placeholder, caption["trans_content"])
+            trans = caption["trans_content"]
+            # Preserve the original author note if translation removes the \thanks command.
+            if caption.get("cap_type") == "thanks" and "\\" + caption["cap_type"] not in trans:
+                trans = caption["content"]
+            tex = tex.replace(placeholder, trans)
 
         return tex                              
     
